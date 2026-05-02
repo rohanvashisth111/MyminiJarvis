@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARVIS — Voice Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@200;300;400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div class="grid-overlay"></div>
+  <div class="scanline"></div>
+
+  <div class="corner corner-tl"></div>
+  <div class="corner corner-tr"></div>
+  <div class="corner corner-bl"></div>
+  <div class="corner corner-br"></div>
+
+  <div class="container">
+
+    <header class="header">
+      <div class="header-left">
+        <span class="system-id">SYS::J.A.R.V.I.S</span>
+        <span class="version">v2.4.1</span>
+      </div>
+      <div class="status-bar">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">TAP TO START</span>
+      </div>
+      <div class="header-right">
+        <span class="clock" id="clock"></span>
+      </div>
+    </header>
+
+    <div class="orb-section">
+      <div class="orb-rings">
+        <div class="ring ring-1"></div>
+        <div class="ring ring-2"></div>
+        <div class="ring ring-3"></div>
+      </div>
+      <div class="orb-container">
+        <div class="orb" id="orb">
+          <div class="orb-inner">
+            <div class="orb-core"></div>
+            <div class="orb-pulse"></div>
+          </div>
+          <div class="orb-icon" id="orbIcon">
+            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M20 4C20 4 20 36 20 36" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              <path d="M13 10C13 10 13 30 13 30" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              <path d="M27 10C27 10 27 30 27 30" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              <path d="M8 16C8 16 8 24 8 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              <path d="M32 16C32 16 32 24 32 24" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="orb-hint" id="orbHint">TAP</div>
+        </div>
+      </div>
+
+      <div class="waveform" id="waveform">
+        <div class="wave-bars">
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="transcript-box" id="transcriptBox">
+      <div class="transcript-label">LIVE INPUT</div>
+      <div class="transcript-text" id="transcriptText">—</div>
+    </div>
+
+    <div class="chat-feed" id="chat"></div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
