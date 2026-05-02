@@ -116,8 +116,11 @@ function speak(text, onDone) {
 
   const finish = () => {
     isSpeaking = false;
-    if (onDone) onDone();
-    // Auto-restart listening after speaking if still active
+    if (onDone) {
+      onDone(); // may navigate away — don't restart mic after this
+      return;
+    }
+    // Only restart mic if no navigation is happening
     if (isListening) {
       setTimeout(() => startSession(), isMobile ? 600 : 200);
     }
@@ -412,17 +415,22 @@ const JOKES = [
 ];
 
 // ================= ACTION ENGINE =================
+function navigate(url) {
+  // On mobile, window.open is blocked as popup — always use location.href
+  window.location.href = url;
+}
+
 function executeIntent(intent) {
   switch (intent.type) {
     case "OPEN_SITE": {
       const { url, name } = resolveUrl(intent.value);
-      speak(`Opening ${name}`, () => { window.open(url, "_blank") || (window.location.href = url); });
+      speak(`Opening ${name}`, () => navigate(url));
       break;
     }
     case "SEARCH":
       if (!intent.value) { speak("What should I search for?"); return; }
       speak(`Searching for ${intent.value}`, () => {
-        window.open(`https://www.google.com/search?q=${encodeURIComponent(intent.value)}`, "_blank");
+        navigate(`https://www.google.com/search?q=${encodeURIComponent(intent.value)}`);
       });
       break;
     case "CALC":
@@ -449,7 +457,7 @@ function executeIntent(intent) {
       break;
     case "WEATHER":
       speak(`Checking weather${intent.value ? " for " + intent.value : ""}`, () => {
-        window.open(`https://www.google.com/search?q=weather+${encodeURIComponent(intent.value)}`, "_blank");
+        navigate(`https://www.google.com/search?q=weather+${encodeURIComponent(intent.value)}`);
       });
       break;
     case "HELP":
