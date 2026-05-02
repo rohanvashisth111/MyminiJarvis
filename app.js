@@ -1,4 +1,4 @@
-/* ─── JARVIS 2.0 — Fast Response Engine ─── */
+/* ─── JARVIS 2.0 — Robust Voice Engine ─── */
 
 // ================= DOM =================
 const chat           = document.getElementById("chat");
@@ -22,14 +22,16 @@ updateClock();
 setInterval(updateClock, 1000);
 
 // ================= STATE =================
-let isListening  = false;
-let isSpeaking   = false;
-let recognition  = null;
-let commitTimer  = null;   // fires when user pauses mid-speech
-let pendingText  = "";     // best interim text so far
+let isListening   = false;
+let isSpeaking    = false;
+let recognition   = null;
 let sessionActive = false;
-
-const COMMIT_DELAY = 800; // ms of silence before we act on interim text
+let finalBuffer   = "";   // accumulates final results within one session
+let commitTimer   = null;
+const isMobile    = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+// On mobile, continuous=true is buggy; we use single-shot mode and restart
+const USE_CONTINUOUS = !isMobile;
+const COMMIT_DELAY   = isMobile ? 500 : 900; // ms after last interim before acting
 
 // ================= UI =================
 function setStatus(mode) {
@@ -51,33 +53,30 @@ function setStatus(mode) {
     statusText.classList.add("speaking");
     statusText.textContent = "SPEAKING";
     orb.classList.add("speaking");
+  } else if (mode === "processing") {
+    statusText.textContent = "PROCESSING";
+    orb.classList.add("speaking");
   } else {
-    statusText.textContent  = "TAP ORB TO START";
+    statusText.textContent     = "TAP ORB TO START";
     transcriptText.textContent = "—";
   }
 }
 
 function addMessage(text, type) {
   const time = new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
-
   const div    = document.createElement("div");
   div.className = "msg " + type;
-
   const avatar = document.createElement("div");
   avatar.className  = "msg-avatar";
   avatar.textContent = type === "user" ? "YOU" : "AI";
-
   const wrap   = document.createElement("div");
   wrap.className = "msg-wrap";
-
   const bubble = document.createElement("div");
   bubble.className  = "msg-bubble";
   bubble.textContent = text;
-
   const ts = document.createElement("div");
   ts.className  = "msg-time";
   ts.textContent = time;
-
   wrap.appendChild(bubble);
   wrap.appendChild(ts);
   div.appendChild(avatar);
@@ -115,36 +114,36 @@ function speak(text, onDone) {
   utter.rate  = 1.1;
   utter.pitch = 1;
 
-  utter.onend = utter.onerror = () => {
+  const finish = () => {
     isSpeaking = false;
     if (onDone) onDone();
-    if (isListening) startSession();
+    // Auto-restart listening after speaking if still active
+    if (isListening) {
+      setTimeout(() => startSession(), isMobile ? 600 : 200);
+    }
   };
+  utter.onend   = finish;
+  utter.onerror = finish;
 
   synth.speak(utter);
 }
 
 // ================= COMMIT LOGIC =================
-// Called whenever we have new interim text.
-// If no new text arrives within COMMIT_DELAY ms, we treat it as finished.
 function scheduleCommit(text) {
-  pendingText = text;
   clearTimeout(commitTimer);
   commitTimer = setTimeout(() => {
-    if (pendingText.trim() && !isSpeaking) {
-      const cmd = pendingText.trim();
-      pendingText = "";
-      // Stop current session so we don't pick up our own voice reply
+    if (text.trim() && !isSpeaking) {
+      clearBuffer();
       stopSession();
-      processCommand(cmd);
+      processCommand(text.trim());
     }
   }, COMMIT_DELAY);
 }
 
-function cancelCommit() {
+function clearBuffer() {
+  finalBuffer = "";
   clearTimeout(commitTimer);
-  commitTimer  = null;
-  pendingText  = "";
+  commitTimer = null;
 }
 
 // ================= RECOGNITION SESSION =================
@@ -153,59 +152,72 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 function buildRecognition() {
   if (!SR) return null;
   const r = new SR();
-  r.continuous      = true;   // keep stream open so WE control timing
-  r.interimResults  = true;   // get words as you speak
+  r.continuous      = USE_CONTINUOUS;
+  r.interimResults  = true;
   r.lang            = "en-US";
-  r.maxAlternatives = 1;
+  r.maxAlternatives = 3; // get more alternatives for accent robustness
+
+  r.onstart = () => {
+    sessionActive = true;
+    setStatus("listening");
+  };
 
   r.onresult = (event) => {
     let interimText = "";
-    let finalText   = "";
+    let newFinal    = "";
 
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      const t = event.results[i][0].transcript;
+      // Pick best alternative that sounds most like a command
+      const best = pickBestAlternative(event.results[i]);
       if (event.results[i].isFinal) {
-        finalText += t;
+        newFinal += best + " ";
       } else {
-        interimText += t;
+        interimText = best;
       }
     }
 
-    const best = (finalText || interimText).trim();
-    if (!best) return;
-
-    // Show live in transcript
-    transcriptText.textContent = best;
-
-    if (finalText.trim()) {
-      // Browser confirmed final — act immediately, no timer needed
-      cancelCommit();
-      stopSession();
-      processCommand(finalText.trim());
-    } else {
-      // Interim — schedule commit if user pauses
-      scheduleCommit(interimText.trim());
+    if (newFinal) {
+      finalBuffer += newFinal;
+      transcriptText.textContent = finalBuffer.trim();
+      // Reset commit timer with full accumulated text
+      scheduleCommit(finalBuffer.trim());
+    } else if (interimText) {
+      // Show interim but schedule commit on the accumulated final + interim
+      transcriptText.textContent = (finalBuffer + interimText).trim();
+      scheduleCommit((finalBuffer + interimText).trim());
     }
   };
 
   r.onspeechend = () => {
-    // User stopped talking — flush whatever we have NOW, don't wait
+    // User stopped — flush immediately
     clearTimeout(commitTimer);
-    commitTimer = null;
-    if (pendingText.trim() && !isSpeaking) {
-      const cmd = pendingText.trim();
-      pendingText = "";
+    const text = (finalBuffer).trim();
+    if (text && !isSpeaking) {
+      clearBuffer();
       stopSession();
-      processCommand(cmd);
+      processCommand(text);
+    } else if (!isMobile) {
+      // On desktop with continuous mode, let onend handle restart
     }
   };
 
   r.onerror = (e) => {
-    if (e.error === "no-speech" || e.error === "aborted") return;
+    sessionActive = false;
+    if (e.error === "no-speech") {
+      // No speech detected — restart quietly on mobile
+      if (isListening && !isSpeaking) setTimeout(() => startSession(), 300);
+      return;
+    }
+    if (e.error === "aborted") return;
     if (e.error === "not-allowed") {
       speak("Microphone access denied. Please allow it in browser settings.");
       isListening = false;
       setStatus("standby");
+      return;
+    }
+    if (e.error === "network") {
+      // Mobile network error — try again
+      if (isListening && !isSpeaking) setTimeout(() => startSession(), 1000);
       return;
     }
     console.warn("SR error:", e.error);
@@ -213,9 +225,8 @@ function buildRecognition() {
 
   r.onend = () => {
     sessionActive = false;
-    // Auto-restart if still supposed to be listening and not mid-speak
     if (isListening && !isSpeaking) {
-      setTimeout(() => startSession(), 100);
+      setTimeout(() => startSession(), isMobile ? 400 : 100);
     }
   };
 
@@ -224,26 +235,41 @@ function buildRecognition() {
 
 function startSession() {
   if (!isListening || isSpeaking || sessionActive) return;
-  cancelCommit();
+  clearBuffer();
   recognition = buildRecognition();
   if (!recognition) return;
   try {
     recognition.start();
-    sessionActive = true;
-    setStatus("listening");
   } catch (e) {
     sessionActive = false;
-    setTimeout(() => startSession(), 300);
+    setTimeout(() => startSession(), 400);
   }
 }
 
 function stopSession() {
-  cancelCommit();
+  clearBuffer();
   sessionActive = false;
   if (recognition) {
     try { recognition.abort(); } catch (_) {}
     recognition = null;
   }
+}
+
+// ================= PICK BEST ALTERNATIVE =================
+// Tries each recognition alternative and picks one that matches a known command pattern
+function pickBestAlternative(result) {
+  const alts = [];
+  for (let i = 0; i < result.length; i++) {
+    alts.push(result[i].transcript.trim().toLowerCase());
+  }
+  // Prefer an alternative that looks like a command (has a verb keyword)
+  const keywords = ["open","search","find","play","go to","launch","what","tell","calculate","weather","joke","help","bye","hello","hi","time","date","day"];
+  for (const alt of alts) {
+    for (const kw of keywords) {
+      if (alt.includes(kw)) return alt;
+    }
+  }
+  return alts[0]; // fallback to top result
 }
 
 // ================= WEBSITE DIRECTORY =================
@@ -281,54 +307,98 @@ const SITE_MAP = {
   makemytrip:"https://makemytrip.com",irctc:"https://irctc.co.in",
   paytm:"https://paytm.com",phonepe:"https://phonepe.com",
   gpay:"https://pay.google.com","google pay":"https://pay.google.com",
+  claude:"https://claude.ai",chatgpt:"https://chat.openai.com",
+  openai:"https://openai.com",perplexity:"https://perplexity.ai",
 };
 
 function resolveUrl(siteName) {
-  const key = siteName.trim().toLowerCase();
+  const key = siteName.trim().toLowerCase().replace(/[^\w\s]/g,"");
+  // Exact match
   if (SITE_MAP[key]) return { url: SITE_MAP[key], name: key };
+  // Partial match — site name anywhere in input, or input anywhere in site name
   for (const [alias, url] of Object.entries(SITE_MAP)) {
-    if (key.includes(alias) || alias.includes(key)) return { url, name: alias };
+    const cleanAlias = alias.replace(/[^\w\s]/g,"");
+    if (key.includes(cleanAlias) || cleanAlias.includes(key)) return { url, name: alias };
   }
-  return { url: `https://www.${key.replace(/\s+/g,"")}.com`, name: key };
+  // Last resort — try constructing URL
+  const slug = key.replace(/\s+/g,"");
+  return { url: `https://www.${slug}.com`, name: siteName };
 }
 
 // ================= INTENT ENGINE =================
+// Accent-robust: match on PRESENCE of keyword anywhere, not strict prefix
 function normalize(text) {
   return text.toLowerCase()
-    .replace(/\bplease\b|\bfor me\b|\bcan you\b|\bcould you\b|\bhey\b|\bjarvis\b/gi,"")
+    .replace(/\bplease\b|\bfor me\b|\bcan you\b|\bcould you\b|\bhey\b|\bjarvis\b|\bjara\b|\bjavis\b/gi,"")
     .replace(/\s+/g," ").trim();
+}
+
+// Extract what comes AFTER a trigger word (handles accent/word-order variation)
+function extractAfter(cmd, triggers) {
+  for (const trigger of triggers) {
+    const idx = cmd.indexOf(trigger);
+    if (idx !== -1) {
+      const after = cmd.slice(idx + trigger.length).trim();
+      if (after) return after;
+    }
+  }
+  return null;
 }
 
 function getIntent(raw) {
   const cmd = normalize(raw);
 
-  const openMatch = cmd.match(/^(?:open|launch|go to|take me to|navigate to|load|show me|visit)\s+(.+)$/);
-  if (openMatch) return { type:"OPEN_SITE", value: openMatch[1].trim() };
+  // ── OPEN / NAVIGATE ──
+  const openTriggers = ["open","launch","go to","navigate to","take me to","load","visit","show me","start"];
+  const openTarget = extractAfter(cmd, openTriggers);
+  if (openTarget) return { type:"OPEN_SITE", value: openTarget };
 
-  const searchMatch = cmd.match(/^(?:search(?:\s+for)?|look up|find|google)\s+(.+)$/);
-  if (searchMatch) return { type:"SEARCH", value: searchMatch[1].trim() };
+  // ── SEARCH ──
+  const searchTriggers = ["search for","search","look up","find","google","bing"];
+  const searchTarget = extractAfter(cmd, searchTriggers);
+  if (searchTarget) return { type:"SEARCH", value: searchTarget };
 
-  const calcCmd = cmd
-    .replace(/calculate|what'?s?|what is/g,"")
-    .replace(/plus/g,"+").replace(/minus/g,"-")
-    .replace(/times|multiplied by/g,"*").replace(/divided by/g,"/")
+  // ── MATH ──
+  const mathClean = cmd
+    .replace(/calculate|what is|what'?s|how much is/g,"")
+    .replace(/\bplus\b/g,"+").replace(/\bminus\b/g,"-")
+    .replace(/\btimes\b|\bmultiplied by\b/g,"*").replace(/\bdivided by\b/g,"/")
     .trim();
-  if (/^[\d\s\+\-\*\/\^\(\)\.]+$/.test(calcCmd) && /\d/.test(calcCmd))
-    return { type:"CALC", value: calcCmd };
+  if (/^[\d\s\+\-\*\/\^\(\)\.]+$/.test(mathClean) && /\d/.test(mathClean))
+    return { type:"CALC", value: mathClean };
 
-  if (cmd.includes("time"))   return { type:"TIME" };
-  if (cmd.includes("date"))   return { type:"DATE" };
-  if (cmd.includes("day"))    return { type:"DAY" };
-  if (/\b(hello|hi|hey|howdy|greetings)\b/.test(cmd)) return { type:"GREETING" };
-  if (cmd.includes("joke") || cmd.includes("make me laugh")) return { type:"JOKE" };
-  if (cmd.includes("weather")) {
-    const place = cmd.replace(/weather|in|of|at|the|what'?s?|how'?s?|is|like/g,"").trim();
-    return { type:"WEATHER", value: place || "your location" };
+  // ── TIME / DATE / DAY ──
+  if (/\btime\b/.test(cmd))    return { type:"TIME" };
+  if (/\bdate\b/.test(cmd))    return { type:"DATE" };
+  if (/\bday\b/.test(cmd))     return { type:"DAY" };
+
+  // ── GREETINGS ──
+  if (/\b(hello|hi|hey|howdy|greetings|sup|what's up|wassup)\b/.test(cmd)) return { type:"GREETING" };
+
+  // ── JOKE ──
+  if (/\bjoke\b|\blaugh\b|\bfunny\b|\bamuse\b/.test(cmd)) return { type:"JOKE" };
+
+  // ── WEATHER ──
+  if (/\bweather\b/.test(cmd)) {
+    const place = cmd.replace(/weather|in|of|at|the|what'?s?|how'?s?|is|like|check|today/g,"").trim();
+    return { type:"WEATHER", value: place || "" };
   }
-  if (cmd.includes("help") || cmd.includes("what can you do")) return { type:"HELP" };
-  if (/\b(bye|goodbye|see you|stop|quit)\b/.test(cmd)) return { type:"BYE" };
 
-  return { type:"UNKNOWN" };
+  // ── HELP ──
+  if (/\bhelp\b|\bwhat can you do\b|\bcommands\b/.test(cmd)) return { type:"HELP" };
+
+  // ── BYE ──
+  if (/\b(bye|goodbye|see you|stop|quit|exit|turn off|deactivate)\b/.test(cmd)) return { type:"BYE" };
+
+  // ── FALLBACK: if only one word that's a known site, open it ──
+  const words = cmd.trim().split(/\s+/);
+  if (words.length <= 2) {
+    for (const w of words) {
+      if (SITE_MAP[w]) return { type:"OPEN_SITE", value: w };
+    }
+  }
+
+  return { type:"UNKNOWN", raw: cmd };
 }
 
 // ================= JOKES =================
@@ -338,6 +408,7 @@ const JOKES = [
   "Why did the programmer quit his job? Because he didn't get arrays.",
   "There are 10 types of people — those who understand binary, and those who don't.",
   "Why do Java developers wear glasses? Because they don't C sharp.",
+  "My password is 'incorrect'. So when I forget it, the site tells me: your password is incorrect.",
 ];
 
 // ================= ACTION ENGINE =================
@@ -345,13 +416,13 @@ function executeIntent(intent) {
   switch (intent.type) {
     case "OPEN_SITE": {
       const { url, name } = resolveUrl(intent.value);
-      speak(`Opening ${name}`, () => { window.location.href = url; });
+      speak(`Opening ${name}`, () => { window.open(url, "_blank") || (window.location.href = url); });
       break;
     }
     case "SEARCH":
       if (!intent.value) { speak("What should I search for?"); return; }
       speak(`Searching for ${intent.value}`, () => {
-        window.location.href = `https://www.google.com/search?q=${encodeURIComponent(intent.value)}`;
+        window.open(`https://www.google.com/search?q=${encodeURIComponent(intent.value)}`, "_blank");
       });
       break;
     case "CALC":
@@ -371,19 +442,18 @@ function executeIntent(intent) {
       speak("Today is " + new Date().toLocaleDateString([], { weekday:"long" }));
       break;
     case "GREETING":
-      speak("Hello! How can I help you?");
+      speak("Hello! How can I help you today?");
       break;
     case "JOKE":
       speak(JOKES[Math.floor(Math.random() * JOKES.length)]);
       break;
     case "WEATHER":
-      speak(`Checking weather for ${intent.value}`, () => {
-        const q = intent.value === "your location" ? "" : intent.value;
-        window.location.href = `https://www.google.com/search?q=weather+${encodeURIComponent(q)}`;
+      speak(`Checking weather${intent.value ? " for " + intent.value : ""}`, () => {
+        window.open(`https://www.google.com/search?q=weather+${encodeURIComponent(intent.value)}`, "_blank");
       });
       break;
     case "HELP":
-      speak("I can open websites, search the web, tell time, calculate math, tell jokes, and check weather.");
+      speak("You can say: open YouTube, search something, what time is it, calculate 5 plus 3, tell me a joke, weather in Delhi, or goodbye.");
       break;
     case "BYE":
       speak("Goodbye!", () => {
@@ -393,7 +463,7 @@ function executeIntent(intent) {
       });
       break;
     default:
-      speak("I didn't catch that. Try: open YouTube, search something, or what's the time.");
+      speak(`I heard: ${intent.raw || "something unclear"}. Try saying open YouTube, or search for something.`);
   }
 }
 
@@ -401,20 +471,35 @@ function executeIntent(intent) {
 function processCommand(text) {
   if (!text.trim()) return;
   addMessage(text, "user");
+  setStatus("processing");
   executeIntent(getIntent(text));
 }
 
 // ================= ORB TOGGLE =================
 orb.onclick = () => {
-  if (!SR) { alert("Speech recognition requires Chrome or Edge."); return; }
+  if (!SR) {
+    speak("Voice recognition is not supported in this browser. Please use Chrome or Safari.");
+    return;
+  }
 
   if (isListening) {
     isListening = false;
     stopSession();
+    synth.cancel();
+    isSpeaking = false;
     setStatus("standby");
-    speak("Going to standby.");
   } else {
     isListening = true;
-    speak("Listening.", () => startSession());
+    // On mobile, we speak first then start (requires gesture chain)
+    speak("Listening. What can I do for you?", () => startSession());
   }
 };
+
+// ================= MOBILE: keep mic alive on visibility change =================
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopSession();
+  } else if (isListening && !isSpeaking) {
+    setTimeout(() => startSession(), 500);
+  }
+});
