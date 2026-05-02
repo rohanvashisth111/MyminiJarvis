@@ -1,4 +1,4 @@
-/* ─── JARVIS 2.0 — Robust Voice Engine ─── */
+/* ─── JARVIS — Mobile-First Voice Engine ─── */
 
 // ================= DOM =================
 const chat           = document.getElementById("chat");
@@ -21,17 +21,16 @@ function updateClock() {
 updateClock();
 setInterval(updateClock, 1000);
 
+// ================= DEVICE =================
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
 // ================= STATE =================
 let isListening   = false;
 let isSpeaking    = false;
 let recognition   = null;
 let sessionActive = false;
-let finalBuffer   = "";   // accumulates final results within one session
+let finalBuffer   = "";
 let commitTimer   = null;
-const isMobile    = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-// On mobile, continuous=true is buggy; we use single-shot mode and restart
-const USE_CONTINUOUS = !isMobile;
-const COMMIT_DELAY   = isMobile ? 500 : 900; // ms after last interim before acting
 
 // ================= UI =================
 function setStatus(mode) {
@@ -53,9 +52,6 @@ function setStatus(mode) {
     statusText.classList.add("speaking");
     statusText.textContent = "SPEAKING";
     orb.classList.add("speaking");
-  } else if (mode === "processing") {
-    statusText.textContent = "PROCESSING";
-    orb.classList.add("speaking");
   } else {
     statusText.textContent     = "TAP ORB TO START";
     transcriptText.textContent = "—";
@@ -67,15 +63,15 @@ function addMessage(text, type) {
   const div    = document.createElement("div");
   div.className = "msg " + type;
   const avatar = document.createElement("div");
-  avatar.className  = "msg-avatar";
+  avatar.className   = "msg-avatar";
   avatar.textContent = type === "user" ? "YOU" : "AI";
   const wrap   = document.createElement("div");
   wrap.className = "msg-wrap";
   const bubble = document.createElement("div");
-  bubble.className  = "msg-bubble";
+  bubble.className   = "msg-bubble";
   bubble.textContent = text;
   const ts = document.createElement("div");
-  ts.className  = "msg-time";
+  ts.className   = "msg-time";
   ts.textContent = time;
   wrap.appendChild(bubble);
   wrap.appendChild(ts);
@@ -85,11 +81,8 @@ function addMessage(text, type) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-// ================= SPEECH SYNTHESIS =================
+// ================= SPEECH =================
 const synth = window.speechSynthesis;
-
-// Chrome bug: synth silently pauses after ~15s
-setInterval(() => { if (synth.speaking) { synth.pause(); synth.resume(); } }, 10000);
 
 function getVoice() {
   const voices = synth.getVoices();
@@ -98,37 +91,41 @@ function getVoice() {
       || voices.find(v => v.lang.startsWith("en"))
       || null;
 }
-if (speechSynthesis.onvoiceschanged !== undefined) {
-  speechSynthesis.onvoiceschanged = () => getVoice();
-}
+if (speechSynthesis.onvoiceschanged !== undefined) speechSynthesis.onvoiceschanged = getVoice;
 
-function speak(text, onDone) {
+// Fire-and-forget speak — never blocks navigation
+function speak(text) {
   synth.cancel();
-  isSpeaking = true;
-  setStatus("speaking");
   addMessage(text, "bot");
+  setStatus("speaking");
+  isSpeaking = true;
 
   const utter = new SpeechSynthesisUtterance(text);
   const voice = getVoice();
   if (voice) utter.voice = voice;
-  utter.rate  = 1.1;
+  utter.rate  = 1.05;
   utter.pitch = 1;
 
-  const finish = () => {
+  const done = () => {
     isSpeaking = false;
-    if (onDone) {
-      onDone(); // may navigate away — don't restart mic after this
-      return;
-    }
-    // Only restart mic if no navigation is happening
-    if (isListening) {
-      setTimeout(() => startSession(), isMobile ? 600 : 200);
-    }
+    if (isListening) setTimeout(() => startSession(), isMobile ? 700 : 250);
   };
-  utter.onend   = finish;
-  utter.onerror = finish;
+  utter.onend   = done;
+  utter.onerror = done;
+
+  // Safety fallback — mobile onend sometimes never fires
+  const safeDuration = text.length * 70 + 1000;
+  setTimeout(() => { if (isSpeaking) done(); }, safeDuration);
 
   synth.speak(utter);
+}
+
+// ================= NAVIGATION =================
+// Navigate immediately — never wait for speech
+function navigate(url) {
+  stopSession();
+  isListening = false;
+  setTimeout(() => { window.location.href = url; }, 350);
 }
 
 // ================= COMMIT LOGIC =================
@@ -136,11 +133,12 @@ function scheduleCommit(text) {
   clearTimeout(commitTimer);
   commitTimer = setTimeout(() => {
     if (text.trim() && !isSpeaking) {
-      clearBuffer();
+      const cmd = text.trim();
+      finalBuffer = "";
       stopSession();
-      processCommand(text.trim());
+      processCommand(cmd);
     }
-  }, COMMIT_DELAY);
+  }, isMobile ? 600 : 900);
 }
 
 function clearBuffer() {
@@ -149,88 +147,69 @@ function clearBuffer() {
   commitTimer = null;
 }
 
-// ================= RECOGNITION SESSION =================
+// ================= RECOGNITION =================
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 function buildRecognition() {
   if (!SR) return null;
   const r = new SR();
-  r.continuous      = USE_CONTINUOUS;
+  r.continuous      = !isMobile; // continuous breaks on mobile
   r.interimResults  = true;
   r.lang            = "en-US";
-  r.maxAlternatives = 3; // get more alternatives for accent robustness
+  r.maxAlternatives = 3;
 
   r.onstart = () => {
     sessionActive = true;
     setStatus("listening");
+    transcriptText.textContent = "—";
   };
 
   r.onresult = (event) => {
-    let interimText = "";
-    let newFinal    = "";
-
+    let interim = "";
+    let final   = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      // Pick best alternative that sounds most like a command
-      const best = pickBestAlternative(event.results[i]);
-      if (event.results[i].isFinal) {
-        newFinal += best + " ";
-      } else {
-        interimText = best;
-      }
+      const text = pickBest(event.results[i]);
+      if (event.results[i].isFinal) final += text + " ";
+      else interim = text;
     }
-
-    if (newFinal) {
-      finalBuffer += newFinal;
+    if (final) {
+      finalBuffer += final;
       transcriptText.textContent = finalBuffer.trim();
-      // Reset commit timer with full accumulated text
       scheduleCommit(finalBuffer.trim());
-    } else if (interimText) {
-      // Show interim but schedule commit on the accumulated final + interim
-      transcriptText.textContent = (finalBuffer + interimText).trim();
-      scheduleCommit((finalBuffer + interimText).trim());
+    } else if (interim) {
+      transcriptText.textContent = (finalBuffer + interim).trim();
+      scheduleCommit((finalBuffer + interim).trim());
     }
   };
 
   r.onspeechend = () => {
-    // User stopped — flush immediately
     clearTimeout(commitTimer);
-    const text = (finalBuffer).trim();
+    const text = finalBuffer.trim();
     if (text && !isSpeaking) {
-      clearBuffer();
+      finalBuffer = "";
       stopSession();
       processCommand(text);
-    } else if (!isMobile) {
-      // On desktop with continuous mode, let onend handle restart
     }
   };
 
   r.onerror = (e) => {
     sessionActive = false;
-    if (e.error === "no-speech") {
-      // No speech detected — restart quietly on mobile
-      if (isListening && !isSpeaking) setTimeout(() => startSession(), 300);
+    if (["no-speech","aborted"].includes(e.error)) {
+      if (isListening && !isSpeaking) setTimeout(() => startSession(), 400);
       return;
     }
-    if (e.error === "aborted") return;
     if (e.error === "not-allowed") {
-      speak("Microphone access denied. Please allow it in browser settings.");
       isListening = false;
+      addMessage("Mic blocked. Allow microphone in browser settings then refresh.", "bot");
       setStatus("standby");
       return;
     }
-    if (e.error === "network") {
-      // Mobile network error — try again
-      if (isListening && !isSpeaking) setTimeout(() => startSession(), 1000);
-      return;
-    }
-    console.warn("SR error:", e.error);
+    if (isListening && !isSpeaking) setTimeout(() => startSession(), 1000);
   };
 
   r.onend = () => {
     sessionActive = false;
-    if (isListening && !isSpeaking) {
-      setTimeout(() => startSession(), isMobile ? 400 : 100);
-    }
+    if (isListening && !isSpeaking) setTimeout(() => startSession(), 300);
   };
 
   return r;
@@ -241,12 +220,8 @@ function startSession() {
   clearBuffer();
   recognition = buildRecognition();
   if (!recognition) return;
-  try {
-    recognition.start();
-  } catch (e) {
-    sessionActive = false;
-    setTimeout(() => startSession(), 400);
-  }
+  try { recognition.start(); }
+  catch (e) { sessionActive = false; setTimeout(() => startSession(), 500); }
 }
 
 function stopSession() {
@@ -259,28 +234,23 @@ function stopSession() {
 }
 
 // ================= PICK BEST ALTERNATIVE =================
-// Tries each recognition alternative and picks one that matches a known command pattern
-function pickBestAlternative(result) {
-  const alts = [];
-  for (let i = 0; i < result.length; i++) {
-    alts.push(result[i].transcript.trim().toLowerCase());
-  }
-  // Prefer an alternative that looks like a command (has a verb keyword)
-  const keywords = ["open","search","find","play","go to","launch","what","tell","calculate","weather","joke","help","bye","hello","hi","time","date","day"];
+function pickBest(result) {
+  const alts = Array.from({length: result.length}, (_, i) =>
+    result[i].transcript.toLowerCase().trim()
+  );
+  const kw = ["open","launch","search","find","go","play","what","tell","weather","joke","help","bye","hi","hello","time","date","day","calculate"];
   for (const alt of alts) {
-    for (const kw of keywords) {
-      if (alt.includes(kw)) return alt;
-    }
+    if (kw.some(k => alt.includes(k))) return alt;
   }
-  return alts[0]; // fallback to top result
+  return alts[0] || "";
 }
 
-// ================= WEBSITE DIRECTORY =================
+// ================= SITE MAP =================
 const SITE_MAP = {
   youtube:"https://youtube.com","you tube":"https://youtube.com",
   instagram:"https://instagram.com",insta:"https://instagram.com",
   facebook:"https://facebook.com",fb:"https://facebook.com",
-  twitter:"https://twitter.com",x:"https://x.com",
+  twitter:"https://twitter.com",
   tiktok:"https://tiktok.com","tik tok":"https://tiktok.com",
   snapchat:"https://snapchat.com",snap:"https://snapchat.com",
   linkedin:"https://linkedin.com",pinterest:"https://pinterest.com",
@@ -305,7 +275,7 @@ const SITE_MAP = {
   twitch:"https://twitch.tv",
   bbc:"https://bbc.com",cnn:"https://cnn.com",ndtv:"https://ndtv.com",
   "times of india":"https://timesofindia.com",toi:"https://timesofindia.com",
-  "the hindu":"https://thehindu.com",thehindu:"https://thehindu.com",
+  "the hindu":"https://thehindu.com",
   maps:"https://maps.google.com","google maps":"https://maps.google.com",
   makemytrip:"https://makemytrip.com",irctc:"https://irctc.co.in",
   paytm:"https://paytm.com",phonepe:"https://phonepe.com",
@@ -315,33 +285,27 @@ const SITE_MAP = {
 };
 
 function resolveUrl(siteName) {
-  const key = siteName.trim().toLowerCase().replace(/[^\w\s]/g,"");
-  // Exact match
+  const key = siteName.trim().toLowerCase().replace(/[^\w\s]/g,"").trim();
   if (SITE_MAP[key]) return { url: SITE_MAP[key], name: key };
-  // Partial match — site name anywhere in input, or input anywhere in site name
   for (const [alias, url] of Object.entries(SITE_MAP)) {
-    const cleanAlias = alias.replace(/[^\w\s]/g,"");
-    if (key.includes(cleanAlias) || cleanAlias.includes(key)) return { url, name: alias };
+    const a = alias.replace(/[^\w\s]/g,"");
+    if (key.includes(a) || a.includes(key)) return { url, name: alias };
   }
-  // Last resort — try constructing URL
-  const slug = key.replace(/\s+/g,"");
-  return { url: `https://www.${slug}.com`, name: siteName };
+  return { url: `https://www.${key.replace(/\s+/g,"")}.com`, name: siteName };
 }
 
 // ================= INTENT ENGINE =================
-// Accent-robust: match on PRESENCE of keyword anywhere, not strict prefix
 function normalize(text) {
   return text.toLowerCase()
-    .replace(/\bplease\b|\bfor me\b|\bcan you\b|\bcould you\b|\bhey\b|\bjarvis\b|\bjara\b|\bjavis\b/gi,"")
+    .replace(/\b(please|for me|can you|could you|hey|jarvis|javis|jara|ok|okay)\b/g,"")
     .replace(/\s+/g," ").trim();
 }
 
-// Extract what comes AFTER a trigger word (handles accent/word-order variation)
 function extractAfter(cmd, triggers) {
-  for (const trigger of triggers) {
-    const idx = cmd.indexOf(trigger);
+  for (const t of triggers) {
+    const idx = cmd.indexOf(t);
     if (idx !== -1) {
-      const after = cmd.slice(idx + trigger.length).trim();
+      const after = cmd.slice(idx + t.length).trim();
       if (after) return after;
     }
   }
@@ -351,53 +315,46 @@ function extractAfter(cmd, triggers) {
 function getIntent(raw) {
   const cmd = normalize(raw);
 
-  // ── OPEN / NAVIGATE ──
-  const openTriggers = ["open","launch","go to","navigate to","take me to","load","visit","show me","start"];
-  const openTarget = extractAfter(cmd, openTriggers);
+  const openTarget = extractAfter(cmd,
+    ["open","launch","go to","navigate to","take me to","load","visit","show me","start","bring up"]);
   if (openTarget) return { type:"OPEN_SITE", value: openTarget };
 
-  // ── SEARCH ──
-  const searchTriggers = ["search for","search","look up","find","google","bing"];
-  const searchTarget = extractAfter(cmd, searchTriggers);
+  const searchTarget = extractAfter(cmd,
+    ["search for","search","look up","find","google","bing"]);
   if (searchTarget) return { type:"SEARCH", value: searchTarget };
 
-  // ── MATH ──
   const mathClean = cmd
-    .replace(/calculate|what is|what'?s|how much is/g,"")
+    .replace(/calculate|compute|what is|what's|how much is/g,"")
     .replace(/\bplus\b/g,"+").replace(/\bminus\b/g,"-")
     .replace(/\btimes\b|\bmultiplied by\b/g,"*").replace(/\bdivided by\b/g,"/")
     .trim();
   if (/^[\d\s\+\-\*\/\^\(\)\.]+$/.test(mathClean) && /\d/.test(mathClean))
     return { type:"CALC", value: mathClean };
 
-  // ── TIME / DATE / DAY ──
-  if (/\btime\b/.test(cmd))    return { type:"TIME" };
-  if (/\bdate\b/.test(cmd))    return { type:"DATE" };
-  if (/\bday\b/.test(cmd))     return { type:"DAY" };
+  if (/\btime\b/.test(cmd))  return { type:"TIME" };
+  if (/\bdate\b/.test(cmd))  return { type:"DATE" };
+  if (/\bday\b/.test(cmd))   return { type:"DAY" };
 
-  // ── GREETINGS ──
-  if (/\b(hello|hi|hey|howdy|greetings|sup|what's up|wassup)\b/.test(cmd)) return { type:"GREETING" };
+  if (/\b(hello|hi|hey|howdy|greetings|sup|wassup)\b/.test(cmd)) return { type:"GREETING" };
+  if (/\b(joke|funny|laugh|amuse)\b/.test(cmd))                  return { type:"JOKE" };
 
-  // ── JOKE ──
-  if (/\bjoke\b|\blaugh\b|\bfunny\b|\bamuse\b/.test(cmd)) return { type:"JOKE" };
-
-  // ── WEATHER ──
   if (/\bweather\b/.test(cmd)) {
-    const place = cmd.replace(/weather|in|of|at|the|what'?s?|how'?s?|is|like|check|today/g,"").trim();
-    return { type:"WEATHER", value: place || "" };
+    const place = cmd.replace(/\b(weather|in|of|at|the|what|how|is|like|check|today|s)\b/g,"").trim();
+    return { type:"WEATHER", value: place };
   }
 
-  // ── HELP ──
-  if (/\bhelp\b|\bwhat can you do\b|\bcommands\b/.test(cmd)) return { type:"HELP" };
+  if (/\b(help|commands|what can you do)\b/.test(cmd)) return { type:"HELP" };
+  if (/\b(bye|goodbye|see you|stop|quit|exit|turn off)\b/.test(cmd)) return { type:"BYE" };
 
-  // ── BYE ──
-  if (/\b(bye|goodbye|see you|stop|quit|exit|turn off|deactivate)\b/.test(cmd)) return { type:"BYE" };
-
-  // ── FALLBACK: if only one word that's a known site, open it ──
+  // Bare site name (no open keyword)
   const words = cmd.trim().split(/\s+/);
-  if (words.length <= 2) {
-    for (const w of words) {
-      if (SITE_MAP[w]) return { type:"OPEN_SITE", value: w };
+  for (const w of words) {
+    if (SITE_MAP[w]) return { type:"OPEN_SITE", value: w };
+  }
+  if (words.length >= 2) {
+    for (let i = 0; i < words.length - 1; i++) {
+      const pair = words[i] + " " + words[i+1];
+      if (SITE_MAP[pair]) return { type:"OPEN_SITE", value: pair };
     }
   }
 
@@ -409,30 +366,38 @@ const JOKES = [
   "Why don't scientists trust atoms? Because they make up everything.",
   "I told my computer I needed a break. Now it won't stop sending me Kit-Kat ads.",
   "Why did the programmer quit his job? Because he didn't get arrays.",
-  "There are 10 types of people — those who understand binary, and those who don't.",
+  "There are 10 types of people in the world — those who understand binary, and those who don't.",
   "Why do Java developers wear glasses? Because they don't C sharp.",
-  "My password is 'incorrect'. So when I forget it, the site tells me: your password is incorrect.",
+  "My password is incorrect. So when I forget it, the site helpfully tells me: your password is incorrect.",
 ];
 
-// ================= ACTION ENGINE =================
-function navigate(url) {
-  // On mobile, window.open is blocked as popup — always use location.href
-  window.location.href = url;
-}
-
+// ================= EXECUTE =================
+// CRITICAL: For navigation, addMessage + navigate IMMEDIATELY. speak() is side-effect only.
 function executeIntent(intent) {
   switch (intent.type) {
+
     case "OPEN_SITE": {
       const { url, name } = resolveUrl(intent.value);
-      speak(`Opening ${name}`, () => navigate(url));
+      speak(`Opening ${name}`);  // fire and forget
+      navigate(url);             // act immediately
       break;
     }
-    case "SEARCH":
+
+    case "SEARCH": {
       if (!intent.value) { speak("What should I search for?"); return; }
-      speak(`Searching for ${intent.value}`, () => {
-        navigate(`https://www.google.com/search?q=${encodeURIComponent(intent.value)}`);
-      });
+      const q = `https://www.google.com/search?q=${encodeURIComponent(intent.value)}`;
+      speak(`Searching for ${intent.value}`);
+      navigate(q);
       break;
+    }
+
+    case "WEATHER": {
+      const place = intent.value || "";
+      speak(`Checking weather${place ? " for " + place : ""}`);
+      navigate(`https://www.google.com/search?q=weather+${encodeURIComponent(place)}`);
+      break;
+    }
+
     case "CALC":
       try {
         // eslint-disable-next-line no-new-func
@@ -440,38 +405,40 @@ function executeIntent(intent) {
         speak(`That equals ${result}`);
       } catch { speak("I couldn't calculate that."); }
       break;
+
     case "TIME":
       speak("It's " + new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" }));
       break;
+
     case "DATE":
       speak("Today is " + new Date().toLocaleDateString([], { weekday:"long", year:"numeric", month:"long", day:"numeric" }));
       break;
+
     case "DAY":
       speak("Today is " + new Date().toLocaleDateString([], { weekday:"long" }));
       break;
+
     case "GREETING":
-      speak("Hello! How can I help you today?");
+      speak("Hello! How can I help you?");
       break;
+
     case "JOKE":
       speak(JOKES[Math.floor(Math.random() * JOKES.length)]);
       break;
-    case "WEATHER":
-      speak(`Checking weather${intent.value ? " for " + intent.value : ""}`, () => {
-        navigate(`https://www.google.com/search?q=weather+${encodeURIComponent(intent.value)}`);
-      });
-      break;
+
     case "HELP":
-      speak("You can say: open YouTube, search something, what time is it, calculate 5 plus 3, tell me a joke, weather in Delhi, or goodbye.");
+      speak("Try: open YouTube, search for cricket score, weather in Delhi, what time is it, or tell me a joke.");
       break;
+
     case "BYE":
-      speak("Goodbye!", () => {
-        isListening = false;
-        stopSession();
-        setStatus("standby");
-      });
+      speak("Goodbye!");
+      isListening = false;
+      stopSession();
+      setTimeout(() => setStatus("standby"), 1500);
       break;
+
     default:
-      speak(`I heard: ${intent.raw || "something unclear"}. Try saying open YouTube, or search for something.`);
+      speak(`I heard: ${intent.raw || "something unclear"}. Try saying open YouTube or search for something.`);
   }
 }
 
@@ -479,14 +446,13 @@ function executeIntent(intent) {
 function processCommand(text) {
   if (!text.trim()) return;
   addMessage(text, "user");
-  setStatus("processing");
   executeIntent(getIntent(text));
 }
 
-// ================= ORB TOGGLE =================
-orb.onclick = () => {
+// ================= ORB =================
+orb.addEventListener("click", () => {
   if (!SR) {
-    speak("Voice recognition is not supported in this browser. Please use Chrome or Safari.");
+    addMessage("Voice not supported. Please use Chrome on Android or Safari on iOS.", "bot");
     return;
   }
 
@@ -498,16 +464,15 @@ orb.onclick = () => {
     setStatus("standby");
   } else {
     isListening = true;
-    // On mobile, we speak first then start (requires gesture chain)
-    speak("Listening. What can I do for you?", () => startSession());
+    // Start mic FIRST (needs the tap gesture on mobile)
+    startSession();
+    // Then speak welcome after short delay
+    setTimeout(() => speak("Listening. What can I do for you?"), 150);
   }
-};
+});
 
-// ================= MOBILE: keep mic alive on visibility change =================
+// ================= VISIBILITY =================
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) {
-    stopSession();
-  } else if (isListening && !isSpeaking) {
-    setTimeout(() => startSession(), 500);
-  }
+  if (document.hidden) stopSession();
+  else if (isListening && !isSpeaking) setTimeout(() => startSession(), 600);
 });
